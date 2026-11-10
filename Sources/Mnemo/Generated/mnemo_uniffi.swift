@@ -699,10 +699,25 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
     func essenceAdd(scope: EssenceScope, section: EssenceSection, text: String, refs: [String]?) throws  -> String
     
     /**
+     * `essence_add` with the caller's vector, embedded before the call so
+     * no embedder runs under the lock. With `None` it's `essence_add`: the
+     * registered embedder, if any, or else a neutral vector (essence is
+     * read by section, not similarity). The Swift and Kotlin stores pass a
+     * vector whenever they have an embedder.
+     */
+    func essenceAddWithVector(scope: EssenceScope, section: EssenceSection, text: String, refs: [String]?, vector: [Float]?) throws  -> String
+    
+    /**
      * Append a timeline entry (at most 600 bytes, append-only). Returns its
      * id. Embeds like `essence_add`.
      */
     func essenceAppendTimeline(scope: EssenceScope, text: String, refs: [String]?) throws  -> String
+    
+    /**
+     * `essence_append_timeline` with the caller's vector, like
+     * [`MnemoDb::essence_add_with_vector`].
+     */
+    func essenceAppendTimelineWithVector(scope: EssenceScope, text: String, refs: [String]?, vector: [Float]?) throws  -> String
     
     /**
      * Remove an item from the render (a soft delete).
@@ -723,8 +738,11 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
     /**
      * Write a copy of this file at `dest` that opens with `passphrase`
      * alone (the secure KDF), on any device: for moving a key-bound file
-     * to a new phone. The live file is flushed first and keeps its own
-     * key; `dest` must not exist.
+     * to a new phone. The copy is written under a fresh data key (through
+     * the compaction path: live memories, the result cache and the index,
+     * no history), so it shares no key material with this file. The live
+     * file is flushed first and keeps its own key; `dest` must not exist.
+     * The handle is locked for the copy and the KDF.
      */
     func exportWithPassphrase(dest: String, passphrase: String) throws 
     
@@ -756,6 +774,22 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
      * in between.
      */
     func ingestThread(threadId: String, turns: [ThreadTurn]) throws  -> IngestReport
+    
+    /**
+     * The first half of an ingest that the caller embeds itself (the
+     * Swift and Kotlin stores, which embed before taking their own lock):
+     * the texts to embed for these turns, in order. Empty when every turn
+     * is already stored.
+     */
+    func ingestThreadPlan(threadId: String, turns: [ThreadTurn]) throws  -> [String]
+    
+    /**
+     * The second half: `texts` is what [`MnemoDb::ingest_thread_plan`]
+     * returned and `vectors` one vector per text. Under one lock, the plan
+     * is checked and applied. `None` when the thread changed since the
+     * plan (plan and embed again); nothing is written then.
+     */
+    func ingestThreadWithVectors(threadId: String, turns: [ThreadTurn], texts: [String], vectors: [[Float]]) throws  -> IngestReport?
     
     /**
      * No live memories.
@@ -1102,6 +1136,27 @@ open func essenceAdd(scope: EssenceScope, section: EssenceSection, text: String,
 }
     
     /**
+     * `essence_add` with the caller's vector, embedded before the call so
+     * no embedder runs under the lock. With `None` it's `essence_add`: the
+     * registered embedder, if any, or else a neutral vector (essence is
+     * read by section, not similarity). The Swift and Kotlin stores pass a
+     * vector whenever they have an embedder.
+     */
+open func essenceAddWithVector(scope: EssenceScope, section: EssenceSection, text: String, refs: [String]?, vector: [Float]?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemodb_essence_add_with_vector(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEssenceScope_lower(scope),
+        FfiConverterTypeEssenceSection_lower(section),
+        FfiConverterString.lower(text),
+        FfiConverterOptionSequenceString.lower(refs),
+        FfiConverterOptionSequenceFloat.lower(vector),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Append a timeline entry (at most 600 bytes, append-only). Returns its
      * id. Embeds like `essence_add`.
      */
@@ -1113,6 +1168,23 @@ open func essenceAppendTimeline(scope: EssenceScope, text: String, refs: [String
         FfiConverterTypeEssenceScope_lower(scope),
         FfiConverterString.lower(text),
         FfiConverterOptionSequenceString.lower(refs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * `essence_append_timeline` with the caller's vector, like
+     * [`MnemoDb::essence_add_with_vector`].
+     */
+open func essenceAppendTimelineWithVector(scope: EssenceScope, text: String, refs: [String]?, vector: [Float]?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemodb_essence_append_timeline_with_vector(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEssenceScope_lower(scope),
+        FfiConverterString.lower(text),
+        FfiConverterOptionSequenceString.lower(refs),
+        FfiConverterOptionSequenceFloat.lower(vector),uniffiCallStatus
     )
 })
 }
@@ -1161,8 +1233,11 @@ open func essenceUpdate(id: String, text: String, refs: [String]?)throws  -> Wri
     /**
      * Write a copy of this file at `dest` that opens with `passphrase`
      * alone (the secure KDF), on any device: for moving a key-bound file
-     * to a new phone. The live file is flushed first and keeps its own
-     * key; `dest` must not exist.
+     * to a new phone. The copy is written under a fresh data key (through
+     * the compaction path: live memories, the result cache and the index,
+     * no history), so it shares no key material with this file. The live
+     * file is flushed first and keeps its own key; `dest` must not exist.
+     * The handle is locked for the copy and the KDF.
      */
 open func exportWithPassphrase(dest: String, passphrase: String)throws   {try rustCallWithError(FfiConverterTypeMnemoError_lift) {
         uniffiCallStatus in
@@ -1237,6 +1312,42 @@ open func ingestThread(threadId: String, turns: [ThreadTurn])throws  -> IngestRe
             self.uniffiCloneHandle(),
         FfiConverterString.lower(threadId),
         FfiConverterSequenceTypeThreadTurn.lower(turns),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The first half of an ingest that the caller embeds itself (the
+     * Swift and Kotlin stores, which embed before taking their own lock):
+     * the texts to embed for these turns, in order. Empty when every turn
+     * is already stored.
+     */
+open func ingestThreadPlan(threadId: String, turns: [ThreadTurn])throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemodb_ingest_thread_plan(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(threadId),
+        FfiConverterSequenceTypeThreadTurn.lower(turns),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The second half: `texts` is what [`MnemoDb::ingest_thread_plan`]
+     * returned and `vectors` one vector per text. Under one lock, the plan
+     * is checked and applied. `None` when the thread changed since the
+     * plan (plan and embed again); nothing is written then.
+     */
+open func ingestThreadWithVectors(threadId: String, turns: [ThreadTurn], texts: [String], vectors: [[Float]])throws  -> IngestReport?  {
+    return try  FfiConverterOptionTypeIngestReport.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemodb_ingest_thread_with_vectors(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(threadId),
+        FfiConverterSequenceTypeThreadTurn.lower(turns),
+        FfiConverterSequenceString.lower(texts),
+        FfiConverterSequenceSequenceFloat.lower(vectors),uniffiCallStatus
     )
 })
 }
@@ -1838,13 +1949,20 @@ public struct DbStats: Equatable, Hashable {
     public var formatVersion: UInt16
     public var hasIndex: Bool
     public var walPages: UInt64
+    /**
+     * How recall scores vectors right now (see [`RecallMode`]).
+     */
+    public var recallMode: RecallMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(memories: UInt64, deleted: UInt64, dimensions: UInt32, fileBytes: UInt64, 
         /**
          * `8` or `9`.
-         */formatVersion: UInt16, hasIndex: Bool, walPages: UInt64) {
+         */formatVersion: UInt16, hasIndex: Bool, walPages: UInt64, 
+        /**
+         * How recall scores vectors right now (see [`RecallMode`]).
+         */recallMode: RecallMode) {
         self.memories = memories
         self.deleted = deleted
         self.dimensions = dimensions
@@ -1852,6 +1970,7 @@ public struct DbStats: Equatable, Hashable {
         self.formatVersion = formatVersion
         self.hasIndex = hasIndex
         self.walPages = walPages
+        self.recallMode = recallMode
     }
 
     
@@ -1876,7 +1995,8 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
                 fileBytes: FfiConverterUInt64.read(from: &buf), 
                 formatVersion: FfiConverterUInt16.read(from: &buf), 
                 hasIndex: FfiConverterBool.read(from: &buf), 
-                walPages: FfiConverterUInt64.read(from: &buf)
+                walPages: FfiConverterUInt64.read(from: &buf), 
+                recallMode: FfiConverterTypeRecallMode.read(from: &buf)
         )
     }
 
@@ -1888,6 +2008,7 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
         FfiConverterUInt16.write(value.formatVersion, into: &buf)
         FfiConverterBool.write(value.hasIndex, into: &buf)
         FfiConverterUInt64.write(value.walPages, into: &buf)
+        FfiConverterTypeRecallMode.write(value.recallMode, into: &buf)
     }
 }
 
@@ -3650,6 +3771,94 @@ public func FfiConverterTypeMnemoError_lower(_ value: MnemoError) -> RustBuffer 
 
 
 /**
+ * How recall scores vectors, from `stats()`.
+ */
+
+public enum RecallMode: Equatable, Hashable {
+    
+    /**
+     * An exact scan over the vector column in memory: the live facts fit
+     * the vector cache budget (16 MiB by default on phones). The fast path.
+     */
+    case exactResident
+    /**
+     * An exact scan that reads vectors from the file: the live facts are
+     * over the budget (or the file is v8). Slower as the file grows: raise
+     * `vector_cache_budget_bytes`, or build an index past 20,000 facts.
+     */
+    case exactPaged
+    /**
+     * The IVF+PQ index shortlists the candidates.
+     */
+    case indexed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RecallMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRecallMode: FfiConverterRustBuffer {
+    typealias SwiftType = RecallMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RecallMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .exactResident
+        
+        case 2: return .exactPaged
+        
+        case 3: return .indexed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RecallMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .exactResident:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .exactPaged:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .indexed:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecallMode_lift(_ buf: RustBuffer) throws -> RecallMode {
+    return try FfiConverterTypeRecallMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRecallMode_lower(_ value: RecallMode) -> RustBuffer {
+    return FfiConverterTypeRecallMode.lower(value)
+}
+
+
+
+/**
  * What a write did.
  */
 
@@ -3859,6 +4068,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeIngestReport: FfiConverterRustBuffer {
+    typealias SwiftType = IngestReport?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeIngestReport.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeIngestReport.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4210,8 +4443,30 @@ public func compactFileWithKey(path: String, key: Data)throws  -> CompactReport 
 })
 }
 /**
+ * Run the app's embedder on `texts`, checking the shape like the binding's
+ * own text calls: a throw is [`MnemoError::Embedder`], a wrong count is
+ * `Embedder`, and a wrong width is `DimensionMismatch`. The Swift and
+ * Kotlin stores call it before taking their lock, then pass the vectors
+ * to the vector APIs, so the embedder may call back into the same store.
+ */
+public func embedTexts(embedder: MnemoEmbedder, texts: [String], dimensions: UInt32)throws  -> [[Float]]  {
+    return try  FfiConverterSequenceSequenceFloat.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_func_embed_texts(
+        FfiConverterTypeMnemoEmbedder_lower(embedder),
+        FfiConverterSequenceString.lower(texts),
+        FfiConverterUInt32.lower(dimensions),uniffiCallStatus
+    )
+})
+}
+/**
  * A fresh random 32-byte key for `create_with_key`. Store it in the
  * Keychain or Keystore: it can't be recovered from the file.
+ *
+ * Zeroizing here is best effort: the key is made in a zeroized array and
+ * copied once into the returned `Vec`, which UniFFI copies into the
+ * foreign buffer and frees without zeroing (a lowering that wiped it would
+ * need unsafe code). The app's copy is the one to look after.
  */
 public func generateKey() -> Data  {
     return try!  FfiConverterData.lift(try! rustCall() {
@@ -4222,9 +4477,11 @@ public func generateKey() -> Data  {
 }
 /**
  * Copy a passphrase file (from `export_with_passphrase`, on another
- * device) to `dest`, re-protected by a new device key, and return that
- * key for the app to store in the Keychain or Keystore. `src` is left as
- * it is; `dest` must not exist.
+ * device) to `dest` under a fresh data key, protected by a new device key,
+ * and return that key for the app to store in the Keychain or Keystore.
+ * The copy shares no key material with `src`: the transfer passphrase
+ * doesn't open it, even with `src`'s header. `src` is opened read-only and
+ * left as it is; `dest` must not exist.
  */
 public func importWithPassphrase(src: String, passphrase: String, dest: String)throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
@@ -4258,10 +4515,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_func_compact_file_with_key() != 61731) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_func_generate_key() != 15331) {
+    if (uniffi_mnemo_uniffi_checksum_func_embed_texts() != 9329) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_func_import_with_passphrase() != 7385) {
+    if (uniffi_mnemo_uniffi_checksum_func_generate_key() != 3878) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mnemo_uniffi_checksum_func_import_with_passphrase() != 42203) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_about() != 9191) {
@@ -4291,7 +4551,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_add() != 62031) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_add_with_vector() != 16433) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_append_timeline() != 59209) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_append_timeline_with_vector() != 54563) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_remove() != 54602) {
@@ -4303,7 +4569,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_essence_update() != 19378) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_export_with_passphrase() != 62964) {
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_export_with_passphrase() != 4944) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_flush() != 20184) {
@@ -4319,6 +4585,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_ingest_thread() != 35601) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_ingest_thread_plan() != 33525) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_ingest_thread_with_vectors() != 47752) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_is_empty() != 16972) {
