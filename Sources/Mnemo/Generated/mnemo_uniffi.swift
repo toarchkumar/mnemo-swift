@@ -673,6 +673,11 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
     /**
      * Flush, then release the file and its lock. Later calls return
      * `Closed`; closing twice is fine.
+     *
+     * If the final flush fails (a full disk, say), the handle is put back:
+     * the file stays open with every unflushed write, the error is
+     * returned, and `flush()` or `close()` can be retried once the cause is
+     * fixed (v0.12.2; before, the writes were lost).
      */
     func close() throws 
     
@@ -842,12 +847,23 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
     func setEmbedder(embedder: MnemoEmbedder) throws 
     
     /**
+     * How many past snapshots (point-in-time restore points) to keep; on a
+     * v9 file this is a hard cap, replacing the default of the newest 16 plus
+     * the last 24 hours. Applies to this handle (v0.12.2, RB-002.5).
+     */
+    func setMaxSnapshots(count: UInt32) throws 
+    
+    /**
      * The in-memory vector column budget, in bytes.
      */
     func setVectorCacheBudget(bytes: UInt64) throws 
     
     /**
      * File statistics.
+     *
+     * The cheap path (`Mnemo::stats_summary`, v0.12.2): no record decrypts
+     * and no index load, so it costs about the same on a fresh handle as on
+     * a warm one. Before, the first call decrypted every record.
      */
     func stats() throws  -> DbStats
     
@@ -1070,6 +1086,11 @@ open func cachePut(namespace: String, key: String, value: Data, ttlSecs: UInt64?
     /**
      * Flush, then release the file and its lock. Later calls return
      * `Closed`; closing twice is fine.
+     *
+     * If the final flush fails (a full disk, say), the handle is put back:
+     * the file stays open with every unflushed write, the error is
+     * returned, and `flush()` or `close()` can be retried once the cause is
+     * fixed (v0.12.2; before, the writes were lost).
      */
 open func close()throws   {try rustCallWithError(FfiConverterTypeMnemoError_lift) {
         uniffiCallStatus in
@@ -1475,6 +1496,20 @@ open func setEmbedder(embedder: MnemoEmbedder)throws   {try rustCallWithError(Ff
 }
     
     /**
+     * How many past snapshots (point-in-time restore points) to keep; on a
+     * v9 file this is a hard cap, replacing the default of the newest 16 plus
+     * the last 24 hours. Applies to this handle (v0.12.2, RB-002.5).
+     */
+open func setMaxSnapshots(count: UInt32)throws   {try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemodb_set_max_snapshots(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * The in-memory vector column budget, in bytes.
      */
 open func setVectorCacheBudget(bytes: UInt64)throws   {try rustCallWithError(FfiConverterTypeMnemoError_lift) {
@@ -1488,6 +1523,10 @@ open func setVectorCacheBudget(bytes: UInt64)throws   {try rustCallWithError(Ffi
     
     /**
      * File statistics.
+     *
+     * The cheap path (`Mnemo::stats_summary`, v0.12.2): no record decrypts
+     * and no index load, so it costs about the same on a fresh handle as on
+     * a warm one. Before, the first call decrypted every record.
      */
 open func stats()throws  -> DbStats  {
     return try  FfiConverterTypeDbStats_lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
@@ -1953,6 +1992,12 @@ public struct DbStats: Equatable, Hashable {
      * How recall scores vectors right now (see [`RecallMode`]).
      */
     public var recallMode: RecallMode
+    /**
+     * The bytes the vector column needs to stay in memory (live facts ×
+     * `2 × dimensions + 4`). Recall is `ExactResident` while the store's
+     * `vectorCacheBudgetBytes` is at least this. `0` on a v8 file.
+     */
+    public var vectorColumnBytes: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1962,7 +2007,12 @@ public struct DbStats: Equatable, Hashable {
          */formatVersion: UInt16, hasIndex: Bool, walPages: UInt64, 
         /**
          * How recall scores vectors right now (see [`RecallMode`]).
-         */recallMode: RecallMode) {
+         */recallMode: RecallMode, 
+        /**
+         * The bytes the vector column needs to stay in memory (live facts ×
+         * `2 × dimensions + 4`). Recall is `ExactResident` while the store's
+         * `vectorCacheBudgetBytes` is at least this. `0` on a v8 file.
+         */vectorColumnBytes: UInt64) {
         self.memories = memories
         self.deleted = deleted
         self.dimensions = dimensions
@@ -1971,6 +2021,7 @@ public struct DbStats: Equatable, Hashable {
         self.hasIndex = hasIndex
         self.walPages = walPages
         self.recallMode = recallMode
+        self.vectorColumnBytes = vectorColumnBytes
     }
 
     
@@ -1996,7 +2047,8 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
                 formatVersion: FfiConverterUInt16.read(from: &buf), 
                 hasIndex: FfiConverterBool.read(from: &buf), 
                 walPages: FfiConverterUInt64.read(from: &buf), 
-                recallMode: FfiConverterTypeRecallMode.read(from: &buf)
+                recallMode: FfiConverterTypeRecallMode.read(from: &buf), 
+                vectorColumnBytes: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -2009,6 +2061,7 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
         FfiConverterBool.write(value.hasIndex, into: &buf)
         FfiConverterUInt64.write(value.walPages, into: &buf)
         FfiConverterTypeRecallMode.write(value.recallMode, into: &buf)
+        FfiConverterUInt64.write(value.vectorColumnBytes, into: &buf)
     }
 }
 
@@ -2708,7 +2761,11 @@ public struct RecallOptions: Equatable, Hashable {
      */
     public var maxBytes: UInt64?
     /**
-     * Record the hits as accessed (persisted on the next flush).
+     * Record the hits as accessed (persisted on the next commit). Off by
+     * default on phones since v0.12.2 (RB-001.5): with it on, every recall
+     * dirties the file, so a recall made in the iOS background ends in a
+     * full commit. Ranking doesn't need it. Turn it on per call when the
+     * access counts matter to the app.
      */
     public var trackAccess: Bool
 
@@ -2729,8 +2786,12 @@ public struct RecallOptions: Equatable, Hashable {
          * Stop adding hits once their content would pass this many bytes.
          */maxBytes: UInt64? = nil, 
         /**
-         * Record the hits as accessed (persisted on the next flush).
-         */trackAccess: Bool = true) {
+         * Record the hits as accessed (persisted on the next commit). Off by
+         * default on phones since v0.12.2 (RB-001.5): with it on, every recall
+         * dirties the file, so a recall made in the iOS background ends in a
+         * full commit. Ranking doesn't need it. Turn it on per call when the
+         * access counts matter to the app.
+         */trackAccess: Bool = false) {
         self.topK = topK
         self.types = types
         self.keywords = keywords
@@ -3559,6 +3620,14 @@ public func FfiConverterTypeMemoryType_lower(_ value: MemoryType) -> RustBuffer 
 /**
  * Every error a binding call can return. Engine errors map onto these;
  * `Closed` and `Embedder` are the binding's own.
+ *
+ * Three classes (`is_retryable` tells the first apart):
+ * - **retry later:** `Locked`, `Io`, `Kdf` (the KDF couldn't get its
+ * memory), `Closed` (reopen);
+ * - **fix the call:** `Invalid`, `DimensionMismatch`, `ReadOnly`,
+ * `NeedsWriteOpen`, `NotFound`, `WrongPassphrase`, `Embedder`;
+ * - **the data is unreadable:** `Corrupt`, `HeaderTampered`, `Crypto`,
+ * `NotAMnemoFile`, `UnsupportedVersion`.
  */
 public 
 enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -3579,9 +3648,34 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case HeaderTampered
     /**
-     * The file's format is newer than this build reads.
+     * The file's format is one this build doesn't open. `message` says which
+     * versions it does (v0.12.2).
      */
-    case UnsupportedVersion(found: UInt16
+    case UnsupportedVersion(found: UInt16, message: String
+    )
+    /**
+     * The file isn't a `.mnemo` database (its magic bytes are wrong).
+     */
+    case NotAMnemoFile(message: String
+    )
+    /**
+     * Deriving the key from the passphrase failed, most often because
+     * Argon2 couldn't allocate its memory on a phone short of RAM.
+     * Retryable.
+     */
+    case Kdf(message: String
+    )
+    /**
+     * A cryptographic operation failed.
+     */
+    case Crypto(message: String
+    )
+    /**
+     * A read-only open needs a read-write open first: the file has a WAL
+     * transaction to recover, or a format migration to apply. Open it
+     * read-write once, then read-only again.
+     */
+    case NeedsWriteOpen(reason: String
     )
     /**
      * No such memory, key, thread or snapshot.
@@ -3608,14 +3702,14 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Io(message: String
     )
     /**
-     * The file failed an integrity check (magic, CRC, page
-     * authentication, decoding), or this handle can no longer be used
-     * (a poisoned lock after a panic: reopen the file).
+     * The file failed an integrity check (a CRC, page authentication,
+     * decoding). Integrity failures only (v0.12.2).
      */
     case Corrupt(message: String
     )
     /**
-     * The handle was closed; open the file again.
+     * The handle was closed, or dropped after a panic poisoned it; open the
+     * file again (the Swift and Kotlin stores do that themselves).
      */
     case Closed
     /**
@@ -3625,6 +3719,20 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Embedder(message: String
     )
 
+    
+    /**
+     * Whether the same call may succeed later with nothing changed: `Locked`,
+     * `Io`, `Kdf` and `Closed` (reopen first). Everything else needs a
+     * different call, or means the data can't be read (v0.12.2).
+     */
+public func isRetryable() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_method_mnemoerror_is_retryable(
+            FfiConverterTypeMnemoError_lower(self),uniffiCallStatus
+    )
+})
+}
     
 
     
@@ -3659,27 +3767,40 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
         case 2: return .WrongPassphrase
         case 3: return .HeaderTampered
         case 4: return .UnsupportedVersion(
-            found: try FfiConverterUInt16.read(from: &buf)
-            )
-        case 5: return .NotFound(
+            found: try FfiConverterUInt16.read(from: &buf), 
             message: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .ReadOnly
-        case 7: return .DimensionMismatch(
+        case 5: return .NotAMnemoFile(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .Kdf(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Crypto(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .NeedsWriteOpen(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 9: return .NotFound(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 10: return .ReadOnly
+        case 11: return .DimensionMismatch(
             expected: try FfiConverterUInt64.read(from: &buf), 
             got: try FfiConverterUInt64.read(from: &buf)
             )
-        case 8: return .Invalid(
+        case 12: return .Invalid(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 9: return .Io(
+        case 13: return .Io(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 10: return .Corrupt(
+        case 14: return .Corrupt(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 11: return .Closed
-        case 12: return .Embedder(
+        case 15: return .Closed
+        case 16: return .Embedder(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -3707,47 +3828,68 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         
         
-        case let .UnsupportedVersion(found):
+        case let .UnsupportedVersion(found,message):
             writeInt(&buf, Int32(4))
             FfiConverterUInt16.write(found, into: &buf)
+            FfiConverterString.write(message, into: &buf)
             
         
-        case let .NotFound(message):
+        case let .NotAMnemoFile(message):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(message, into: &buf)
             
         
-        case .ReadOnly:
+        case let .Kdf(message):
             writeInt(&buf, Int32(6))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Crypto(message):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .NeedsWriteOpen(reason):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .NotFound(message):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case .ReadOnly:
+            writeInt(&buf, Int32(10))
         
         
         case let .DimensionMismatch(expected,got):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(11))
             FfiConverterUInt64.write(expected, into: &buf)
             FfiConverterUInt64.write(got, into: &buf)
             
         
         case let .Invalid(message):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(message, into: &buf)
             
         
         case let .Io(message):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(message, into: &buf)
             
         
         case let .Corrupt(message):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(message, into: &buf)
             
         
         case .Closed:
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(15))
         
         
         case let .Embedder(message):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(16))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -4493,6 +4635,22 @@ public func importWithPassphrase(src: String, passphrase: String, dest: String)t
     )
 })
 }
+/**
+ * Whether `key` opens the raw-key file at `path`, from its header alone
+ * (no lock, no catalog load). `false` is "not this key". It answers even
+ * when the file has a WAL transaction to recover, where a read-only open
+ * would refuse with `NeedsWriteOpen`. The stores use it to find a file's key
+ * when the key-id stamp is lost (v0.12.2).
+ */
+public func keyOpens(path: String, key: Data)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMnemoError_lift) {
+        uniffiCallStatus in
+    uniffi_mnemo_uniffi_fn_func_key_opens(
+        FfiConverterString.lower(path),
+        FfiConverterData.lower(key),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -4524,6 +4682,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_func_import_with_passphrase() != 42203) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mnemo_uniffi_checksum_func_key_opens() != 8355) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_about() != 9191) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4536,7 +4697,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_cache_put() != 18979) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_close() != 8466) {
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_close() != 46617) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_delete() != 47757) {
@@ -4620,10 +4781,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_set_embedder() != 35425) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_set_max_snapshots() != 55625) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_set_vector_cache_budget() != 48819) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_stats() != 42132) {
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_stats() != 10154) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_thread_export() != 10981) {
