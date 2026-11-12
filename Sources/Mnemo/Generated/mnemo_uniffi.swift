@@ -1905,6 +1905,15 @@ public struct CompactReport: Equatable, Hashable {
      * Live result-cache entries after it.
      */
     public var cacheAfter: UInt64
+    /**
+     * Legacy manifest memories that held an all-zero vector and were given
+     * the sentinel vector (v0.13).
+     */
+    public var zeroVectorManifests: UInt64
+    /**
+     * Other all-zero-vector memories, carried unchanged (v0.13).
+     */
+    public var zeroVectorMemories: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1920,11 +1929,20 @@ public struct CompactReport: Equatable, Hashable {
          */cacheBefore: UInt64, 
         /**
          * Live result-cache entries after it.
-         */cacheAfter: UInt64) {
+         */cacheAfter: UInt64, 
+        /**
+         * Legacy manifest memories that held an all-zero vector and were given
+         * the sentinel vector (v0.13).
+         */zeroVectorManifests: UInt64, 
+        /**
+         * Other all-zero-vector memories, carried unchanged (v0.13).
+         */zeroVectorMemories: UInt64) {
         self.before = before
         self.after = after
         self.cacheBefore = cacheBefore
         self.cacheAfter = cacheAfter
+        self.zeroVectorManifests = zeroVectorManifests
+        self.zeroVectorMemories = zeroVectorMemories
     }
 
     
@@ -1946,7 +1964,9 @@ public struct FfiConverterTypeCompactReport: FfiConverterRustBuffer {
                 before: FfiConverterUInt64.read(from: &buf), 
                 after: FfiConverterUInt64.read(from: &buf), 
                 cacheBefore: FfiConverterUInt64.read(from: &buf), 
-                cacheAfter: FfiConverterUInt64.read(from: &buf)
+                cacheAfter: FfiConverterUInt64.read(from: &buf), 
+                zeroVectorManifests: FfiConverterUInt64.read(from: &buf), 
+                zeroVectorMemories: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -1955,6 +1975,8 @@ public struct FfiConverterTypeCompactReport: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.after, into: &buf)
         FfiConverterUInt64.write(value.cacheBefore, into: &buf)
         FfiConverterUInt64.write(value.cacheAfter, into: &buf)
+        FfiConverterUInt64.write(value.zeroVectorManifests, into: &buf)
+        FfiConverterUInt64.write(value.zeroVectorMemories, into: &buf)
     }
 }
 
@@ -1983,7 +2005,7 @@ public struct DbStats: Equatable, Hashable {
     public var dimensions: UInt32
     public var fileBytes: UInt64
     /**
-     * `8` or `9`.
+     * `9`, or `8` for a v8 file opened read-only.
      */
     public var formatVersion: UInt16
     public var hasIndex: Bool
@@ -1998,12 +2020,26 @@ public struct DbStats: Equatable, Hashable {
      * `vectorCacheBudgetBytes` is at least this. `0` on a v8 file.
      */
     public var vectorColumnBytes: UInt64
+    /**
+     * The snapshots retained right now: the restore points. Under churn
+     * the pin cap can keep fewer than the 16-and-24-hours policy.
+     */
+    public var snapshotsRetained: UInt64
+    /**
+     * When the oldest retained snapshot was committed (unix seconds), the
+     * furthest back a restore reaches; `None` with no snapshot.
+     */
+    public var oldestRestorableAt: Int64?
+    /**
+     * The bytes the retained snapshots keep from reuse. `0` on a v8 file.
+     */
+    public var snapshotPinnedBytes: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(memories: UInt64, deleted: UInt64, dimensions: UInt32, fileBytes: UInt64, 
         /**
-         * `8` or `9`.
+         * `9`, or `8` for a v8 file opened read-only.
          */formatVersion: UInt16, hasIndex: Bool, walPages: UInt64, 
         /**
          * How recall scores vectors right now (see [`RecallMode`]).
@@ -2012,7 +2048,18 @@ public struct DbStats: Equatable, Hashable {
          * The bytes the vector column needs to stay in memory (live facts ×
          * `2 × dimensions + 4`). Recall is `ExactResident` while the store's
          * `vectorCacheBudgetBytes` is at least this. `0` on a v8 file.
-         */vectorColumnBytes: UInt64) {
+         */vectorColumnBytes: UInt64, 
+        /**
+         * The snapshots retained right now: the restore points. Under churn
+         * the pin cap can keep fewer than the 16-and-24-hours policy.
+         */snapshotsRetained: UInt64, 
+        /**
+         * When the oldest retained snapshot was committed (unix seconds), the
+         * furthest back a restore reaches; `None` with no snapshot.
+         */oldestRestorableAt: Int64?, 
+        /**
+         * The bytes the retained snapshots keep from reuse. `0` on a v8 file.
+         */snapshotPinnedBytes: UInt64) {
         self.memories = memories
         self.deleted = deleted
         self.dimensions = dimensions
@@ -2022,6 +2069,9 @@ public struct DbStats: Equatable, Hashable {
         self.walPages = walPages
         self.recallMode = recallMode
         self.vectorColumnBytes = vectorColumnBytes
+        self.snapshotsRetained = snapshotsRetained
+        self.oldestRestorableAt = oldestRestorableAt
+        self.snapshotPinnedBytes = snapshotPinnedBytes
     }
 
     
@@ -2048,7 +2098,10 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
                 hasIndex: FfiConverterBool.read(from: &buf), 
                 walPages: FfiConverterUInt64.read(from: &buf), 
                 recallMode: FfiConverterTypeRecallMode.read(from: &buf), 
-                vectorColumnBytes: FfiConverterUInt64.read(from: &buf)
+                vectorColumnBytes: FfiConverterUInt64.read(from: &buf), 
+                snapshotsRetained: FfiConverterUInt64.read(from: &buf), 
+                oldestRestorableAt: FfiConverterOptionInt64.read(from: &buf), 
+                snapshotPinnedBytes: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -2062,6 +2115,9 @@ public struct FfiConverterTypeDbStats: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.walPages, into: &buf)
         FfiConverterTypeRecallMode.write(value.recallMode, into: &buf)
         FfiConverterUInt64.write(value.vectorColumnBytes, into: &buf)
+        FfiConverterUInt64.write(value.snapshotsRetained, into: &buf)
+        FfiConverterOptionInt64.write(value.oldestRestorableAt, into: &buf)
+        FfiConverterUInt64.write(value.snapshotPinnedBytes, into: &buf)
     }
 }
 
@@ -2594,8 +2650,8 @@ public struct MnemoConfig: Equatable, Hashable {
      */
     public var dimensions: UInt32
     /**
-     * `0` (the default) creates the current format, v9; `8` creates a v8
-     * file for readers on v0.10 or earlier.
+     * `0` (the default) or `9`: new files are v9. Since v0.13 a v8 file
+     * can't be created (the v8 sunset); `8` is refused with `Invalid`.
      */
     public var formatVersion: UInt16
     /**
@@ -2614,8 +2670,8 @@ public struct MnemoConfig: Equatable, Hashable {
          * Embedding width. Every stored vector must match it.
          */dimensions: UInt32, 
         /**
-         * `0` (the default) creates the current format, v9; `8` creates a v8
-         * file for readers on v0.10 or earlier.
+         * `0` (the default) or `9`: new files are v9. Since v0.13 a v8 file
+         * can't be created (the v8 sunset); `8` is refused with `Invalid`.
          */formatVersion: UInt16 = UInt16(0), 
         /**
          * The in-memory vector column budget (default 16 MiB).
@@ -3624,8 +3680,9 @@ public func FfiConverterTypeMemoryType_lower(_ value: MemoryType) -> RustBuffer 
  * Three classes (`is_retryable` tells the first apart):
  * - **retry later:** `Locked`, `Io`, `Kdf` (the KDF couldn't get its
  * memory), `Closed` (reopen);
- * - **fix the call:** `Invalid`, `DimensionMismatch`, `ReadOnly`,
- * `NeedsWriteOpen`, `NotFound`, `WrongPassphrase`, `Embedder`;
+ * - **fix the call:** `Invalid`, `DimensionMismatch`, `EmbedderMismatch`,
+ * `FormatTooOld`, `ReadOnly`, `NeedsWriteOpen`, `NotFound`,
+ * `WrongPassphrase`, `Embedder`;
  * - **the data is unreadable:** `Corrupt`, `HeaderTampered`, `Crypto`,
  * `NotAMnemoFile`, `UnsupportedVersion`.
  */
@@ -3678,6 +3735,14 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case NeedsWriteOpen(reason: String
     )
     /**
+     * The file's format is older than v9, so it can't be opened read-write
+     * (the v8 sunset, v0.13). A v8 file still opens read-only; `compact_file`
+     * (or `mnemo compact` on a Mac) converts it to v9 and keeps every live
+     * memory. `message` says which.
+     */
+    case FormatTooOld(version: UInt16, message: String
+    )
+    /**
      * No such memory, key, thread or snapshot.
      */
     case NotFound(message: String
@@ -3690,6 +3755,14 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      * A vector's width doesn't match the file's.
      */
     case DimensionMismatch(expected: UInt64, got: UInt64
+    )
+    /**
+     * The embedder isn't the one this file's vectors came from (another
+     * model, or another revision of the same one, even at the same width).
+     * A file is bound to the first embedder attached to it: use that one,
+     * or create a new store for the new model (EMBED-ID-1).
+     */
+    case EmbedderMismatch(stored: EmbedderIdentity, given: EmbedderIdentity
     )
     /**
      * A bad argument (an empty key, malformed metadata JSON, …).
@@ -3782,25 +3855,33 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
         case 8: return .NeedsWriteOpen(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 9: return .NotFound(
+        case 9: return .FormatTooOld(
+            version: try FfiConverterUInt16.read(from: &buf), 
             message: try FfiConverterString.read(from: &buf)
             )
-        case 10: return .ReadOnly
-        case 11: return .DimensionMismatch(
+        case 10: return .NotFound(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 11: return .ReadOnly
+        case 12: return .DimensionMismatch(
             expected: try FfiConverterUInt64.read(from: &buf), 
             got: try FfiConverterUInt64.read(from: &buf)
             )
-        case 12: return .Invalid(
+        case 13: return .EmbedderMismatch(
+            stored: try FfiConverterTypeEmbedderIdentity.read(from: &buf), 
+            given: try FfiConverterTypeEmbedderIdentity.read(from: &buf)
+            )
+        case 14: return .Invalid(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 13: return .Io(
+        case 15: return .Io(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 14: return .Corrupt(
+        case 16: return .Corrupt(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 15: return .Closed
-        case 16: return .Embedder(
+        case 17: return .Closed
+        case 18: return .Embedder(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -3854,42 +3935,54 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .NotFound(message):
+        case let .FormatTooOld(version,message):
             writeInt(&buf, Int32(9))
+            FfiConverterUInt16.write(version, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .NotFound(message):
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(message, into: &buf)
             
         
         case .ReadOnly:
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
         
         
         case let .DimensionMismatch(expected,got):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterUInt64.write(expected, into: &buf)
             FfiConverterUInt64.write(got, into: &buf)
             
         
-        case let .Invalid(message):
-            writeInt(&buf, Int32(12))
-            FfiConverterString.write(message, into: &buf)
-            
-        
-        case let .Io(message):
+        case let .EmbedderMismatch(stored,given):
             writeInt(&buf, Int32(13))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterTypeEmbedderIdentity.write(stored, into: &buf)
+            FfiConverterTypeEmbedderIdentity.write(given, into: &buf)
             
         
-        case let .Corrupt(message):
+        case let .Invalid(message):
             writeInt(&buf, Int32(14))
             FfiConverterString.write(message, into: &buf)
             
         
-        case .Closed:
+        case let .Io(message):
             writeInt(&buf, Int32(15))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Corrupt(message):
+            writeInt(&buf, Int32(16))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case .Closed:
+            writeInt(&buf, Int32(17))
         
         
         case let .Embedder(message):
-            writeInt(&buf, Int32(16))
+            writeInt(&buf, Int32(18))
             FfiConverterString.write(message, into: &buf)
             
         }
