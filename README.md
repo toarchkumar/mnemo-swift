@@ -13,7 +13,7 @@ In Xcode, **File > Add Package Dependencies...**, then enter
 `https://github.com/toarchkumar/mnemo-swift`. Or, in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/toarchkumar/mnemo-swift", from: "0.13.0"),
+.package(url: "https://github.com/toarchkumar/mnemo-swift", from: "0.14.0"),
 ```
 
 and add the `Mnemo` product to your target. It needs iOS 15 or macOS 12.
@@ -24,9 +24,9 @@ model).
 ## Documentation
 
 See the package guide, in
-[mnemo/bindings/swift/README.md](https://github.com/toarchkumar/mnemo/blob/v0.13.0/mnemo/bindings/swift/README.md):
+[mnemo/bindings/swift/README.md](https://github.com/toarchkumar/mnemo/blob/v0.14.0/mnemo/bindings/swift/README.md):
 it covers `MnemoStore`, keys and backups, and the background rules.
 The changelog is
-[CHANGELOG.md](https://github.com/toarchkumar/mnemo/blob/v0.13.0/CHANGELOG.md).
+[CHANGELOG.md](https://github.com/toarchkumar/mnemo/blob/v0.14.0/CHANGELOG.md).
 
 Apache-2.0.
