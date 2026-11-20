@@ -678,6 +678,12 @@ public protocol MnemoDbProtocol: AnyObject, Sendable {
      * the file stays open with every unflushed write, the error is
      * returned, and `flush()` or `close()` can be retried once the cause is
      * fixed (v0.12.2; before, the writes were lost).
+     *
+     * Except after a commit that failed at or after its commit point: then
+     * the flush is refused with `MaybeStored`, which no retry on this handle
+     * can get past, so the handle is dropped without flushing and the error
+     * returned. Open the file again; the open finishes that commit or drops
+     * it (v0.20.0, RB-016.3).
      */
     func close() throws 
     
@@ -1091,6 +1097,12 @@ open func cachePut(namespace: String, key: String, value: Data, ttlSecs: UInt64?
      * the file stays open with every unflushed write, the error is
      * returned, and `flush()` or `close()` can be retried once the cause is
      * fixed (v0.12.2; before, the writes were lost).
+     *
+     * Except after a commit that failed at or after its commit point: then
+     * the flush is refused with `MaybeStored`, which no retry on this handle
+     * can get past, so the handle is dropped without flushing and the error
+     * returned. Open the file again; the open finishes that commit or drops
+     * it (v0.20.0, RB-016.3).
      */
 open func close()throws   {try rustCallWithError(FfiConverterTypeMnemoError_lift) {
         uniffiCallStatus in
@@ -3679,7 +3691,7 @@ public func FfiConverterTypeMemoryType_lower(_ value: MemoryType) -> RustBuffer 
  *
  * Three classes (`is_retryable` tells the first apart):
  * - **retry later:** `Locked`, `Io`, `Kdf` (the KDF couldn't get its
- * memory), `Closed` (reopen);
+ * memory), `Closed` and `MaybeStored` (reopen);
  * - **fix the call:** `Invalid`, `DimensionMismatch`, `EmbedderMismatch`,
  * `FormatTooOld`, `ReadOnly`, `NeedsWriteOpen`, `NotFound`,
  * `WrongPassphrase`, `Embedder`;
@@ -3786,6 +3798,16 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Closed
     /**
+     * An earlier commit on this handle failed at or after its commit point,
+     * so the handle can't tell whether that commit is in the file, and it
+     * refuses every write (v0.20.0). The binding has dropped the handle
+     * without flushing, so later calls are `Closed`: open the file again,
+     * which finishes the commit or drops it (the Swift and Kotlin stores do
+     * that on the next call). Writes made since that commit are lost.
+     */
+    case MaybeStored(message: String
+    )
+    /**
      * The app's embedder callback threw or returned the wrong shape.
      * Nothing was written.
      */
@@ -3795,8 +3817,9 @@ enum MnemoError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     
     /**
      * Whether the same call may succeed later with nothing changed: `Locked`,
-     * `Io`, `Kdf` and `Closed` (reopen first). Everything else needs a
-     * different call, or means the data can't be read (v0.12.2).
+     * `Io`, `Kdf`, and `Closed` and `MaybeStored` (reopen first). Everything
+     * else needs a different call, or means the data can't be read
+     * (v0.12.2).
      */
 public func isRetryable() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
@@ -3881,7 +3904,10 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
             )
         case 17: return .Closed
-        case 18: return .Embedder(
+        case 18: return .MaybeStored(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 19: return .Embedder(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -3981,8 +4007,13 @@ public struct FfiConverterTypeMnemoError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(17))
         
         
-        case let .Embedder(message):
+        case let .MaybeStored(message):
             writeInt(&buf, Int32(18))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Embedder(message):
+            writeInt(&buf, Int32(19))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -4790,7 +4821,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_cache_put() != 18979) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_close() != 46617) {
+    if (uniffi_mnemo_uniffi_checksum_method_mnemodb_close() != 20926) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mnemo_uniffi_checksum_method_mnemodb_delete() != 47757) {
